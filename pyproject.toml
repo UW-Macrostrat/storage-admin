@@ -1,14 +1,57 @@
-## Project requirements (PEP 518, https://python-poetry.org/).
-
-
 [build-system]
-build-backend = "poetry.core.masonry.api"
-requires = ["poetry-core>=1.0.0"]
+requires = ["uv_build>=0.11.1,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "htpheno.radosgw-admin-client"
+version = "0.9.0"
+description = "Client for the Ceph Object Gateway Admin Operations API"
+authors = [{ name = "Brian Aydemir", email = "baydemir@morgridge.org" }]
+requires-python = ">=3.9,<4.0"
+license = "Apache-2.0"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "humanize>=4.11,<4.12",
+    "radosgw-admin>=1.7,<1.8",
+]
+
+[project.urls]
+Repository = "https://github.com/HTPhenotyping/radosgw_admin_client"
+
+[project.scripts]
+radosgw-admin-client = "htpheno.radosgw_admin_client:entrypoint"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.7,<1.8",
+    "black>=24.10,<24.11",
+    "isort>=5.13,<5.14",
+    "markdown>=3.7,<3.8",
+    "mypy>=1.12,<1.13",
+    "pre-commit>=4.0,<4.1",
+    "pylint>=3.3,<3.4",
+]
 
 
 [tool.black]
 line-length = 96
 target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.uv]
+default-groups = "all"
+
+[tool.uv.build-backend]
+module-name = ["htpheno"]
+module-root = ""
+namespace = true
 
 
 [tool.isort]
@@ -36,38 +79,6 @@ show_error_codes = true
 
 incremental = true
 sqlite_cache = true
-
-
-[tool.poetry]
-name = "htpheno.radosgw-admin-client"
-version = "0.8.2"
-description = "Client for the Ceph Object Gateway Admin Operations API"
-license = "Apache-2.0"
-authors = [
-    "Brian Aydemir <baydemir@morgridge.org>",
-]
-repository = "https://github.com/HTPhenotyping/radosgw_admin_client"
-packages = [{ include = "htpheno" }]
-
-
-[tool.poetry.dependencies]
-python = ">=3.9,<4.0"
-humanize = "~4.11"
-radosgw-admin = "~1.7"
-
-
-[tool.poetry.group.dev.dependencies]
-bandit = "~1.7"
-black = "~24.10"
-isort = "~5.13"
-markdown = "~3.7"
-mypy = "~1.12"
-pre-commit = "~4.0"
-pylint = "~3.3"
-
-
-[tool.poetry.scripts]
-radosgw-admin-client = "htpheno.radosgw_admin_client:entrypoint"
 
 
 [tool.pylint.messages-control]
