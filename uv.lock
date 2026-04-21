@@ -345,6 +345,7 @@ source = { editable = "." }
 dependencies = [
     { name = "humanize" },
     { name = "rgwadmin" },
+    { name = "rich" },
     { name = "typer", version = "0.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "typer", version = "0.24.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
@@ -364,7 +365,8 @@ dev = [
 requires-dist = [
     { name = "humanize", specifier = ">=4.11,<4.12" },
     { name = "rgwadmin", specifier = ">=2.4.5" },
-    { name = "typer", specifier = ">=0.23.2" },
+    { name = "rich", specifier = ">=13.9.2" },
+    { name = "typer", specifier = ">=0.12,<0.25" },
 ]
 
 [package.metadata.requires-dev]

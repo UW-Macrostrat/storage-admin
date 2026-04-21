@@ -1,8 +1,12 @@
 import json
 import re
 from typing import List, Any, Union, Dict
+from rich.console import Console
+from rich.pretty import pprint
 
 from rgwadmin import RGWCap, RGWKey, RGWUser
+
+console = Console()
 
 
 def is_system_user(uid: str) -> bool:
@@ -20,7 +24,8 @@ def simplify(xs: List[Any]) -> List[Any]:
 
 
 def print_json(obj: Union[Dict[Any, Any], List[Any]]) -> None:
-    print(json.dumps(obj, indent=2))
+    # If we are in "human" mode, try
+    pprint(obj, expand_all=True)
 
 
 def jsonify_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:

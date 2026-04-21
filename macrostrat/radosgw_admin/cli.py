@@ -167,8 +167,8 @@ def get_quota(
     uid: str = uid_arg,
 ) -> None:
     conn = get_connection()
-    bucket = json.loads(conn.get_quota(uid, "bucket"))
-    user = json.loads(conn.get_quota(uid, "user"))
+    bucket = conn.get_quota(uid, "bucket")
+    user = conn.get_quota(uid, "user")
 
     print_json(
         {
