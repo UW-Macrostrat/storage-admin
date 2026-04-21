@@ -2,31 +2,26 @@
 Client for the Ceph Object Gateway Admin Operations API.
 """
 
-import argparse
-import json
 import logging
 import os
-import re
-import sys
-from typing import Any, Dict, List, Union, NamedTuple
+from contextvars import ContextVar
 
 import humanize
-
-# import radosgw  # type: ignore[import-untyped]
-# import radosgw.user  # type: ignore[import-untyped]
+import typer
 
 from rgwadmin import RGWAdmin
 from rgwadmin.exceptions import RGWAdminException
-from rgwadmin.user import RGWCap, RGWKey, RGWUser
+from rgwadmin.user import RGWUser
+from typer import Typer, Option, Argument
 
-
-class UserError(RuntimeError):
-    """
-    A runtime error where a stack trace should not be necessary.
-    """
-
-
-# --------------------------------------------------------------------------
+from .utils import (
+    is_system_user,
+    simplify,
+    print_json,
+    jsonify_bucket,
+    jsonify_user,
+    UserError,
+)
 
 
 def get_connection(  # nosec hardcoded_password_default
@@ -69,86 +64,111 @@ def get_connection(  # nosec hardcoded_password_default
     return RGWAdmin(access_key, secret_key, host, admin)
 
 
-def is_system_user(uid: str) -> bool:
-    """
-    Returns True if the uid is for a user that should not be modified.
-    """
-    return bool(re.search(r"admin|rook-ceph|system", uid))
-
-
-def simplify(xs: List[Any]) -> List[Any]:
-    """
-    Attempts to remove duplicate bucket policy statements.
-    """
-    return [json.loads(x) for x in sorted(set(json.dumps(x) for x in xs))]
-
-
-def print_json(obj: Union[Dict[Any, Any], List[Any]]) -> None:
-    print(json.dumps(obj, indent=2))
-
-
 # --------------------------------------------------------------------------
 
 
-def jsonify_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
-    return bucket  # Passthrough inheriting older structure
+def create_command(**kwargs) -> Typer:
+    return Typer(no_args_is_help=True, **kwargs)
 
 
-def jsonify_cap(cap: RGWCap) -> str:
-    return f"{cap.type}={cap.perm}"
+app = Typer(no_args_is_help=True)
+
+import json
+import sys
+from enum import Enum
 
 
-def jsonify_key(key: RGWKey) -> Dict[str, Any]:
-    return {
-        # "key_type": key.key_type, # Thios was only present in the old system
-        "access_key": key.access_key,
-        "secret_key": key.secret_key,
-    }
+class OutputMode(str, Enum):
+    human = "human"
+    json = "json"
+    auto = "auto"
 
 
-def jsonify_user(user: RGWUser) -> Dict[str, Any]:
-    return {
-        "uid": user.user_id,
-        "display_name": user.display_name,
-        "email": user.email,
-        "keys": [jsonify_key(RGWKey(**k)) for k in user.keys],
-        "caps": [jsonify_cap(RGWCap(**c)) for c in user.caps],
-    }
+def resolve_mode(mode: OutputMode, json_flag: bool | None) -> OutputMode:
+    # Highest precedence: explicit --json / --no-json style flag
+    if json_flag is True:
+        return OutputMode.json
+    if json_flag is False:
+        return OutputMode.human
+
+    # Next: explicit --output
+    if mode != OutputMode.auto:
+        return mode
+
+    # Fallback: interactive => human, piped/redirected => json
+    return OutputMode.human if sys.stdout.isatty() else OutputMode.json
 
 
-def get_users(args: argparse.Namespace) -> None:
+output_mode_ctx: ContextVar[OutputMode] = ContextVar("output_mode", default=OutputMode.auto)
+
+
+@app.callback()
+def command_callback(
+    output_mode: OutputMode = Option(OutputMode.auto, "--output"),
+    json_out: bool | None = Option(None, "--json/--human", help="Output as JSON"),
+    verbose: bool = Option(False, "--verbose", "-v", help="Be chatty"),
+) -> None:
+    """Callback to set whether we're in human-readable mode."""
+    mode = resolve_mode(output_mode, json_out)
+    output_mode_ctx.set(mode)
+
+    if verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+
+user_cmd = create_command(short_help="Manage users")
+
+
+@user_cmd.command("get")
+def get_users(
+    include_system: bool = Option(False, "--system/--no-system", help="Include system users"),
+) -> None:
     conn = get_connection()
     users = []
 
     for uid in conn.get_users():
-        if args.include_system or not is_system_user(uid):
+        if include_system or not is_system_user(uid):
             ures = conn.get_user(uid)
             users.append(RGWUser(**ures))
 
     print_json([jsonify_user(u) for u in users])
 
 
-def create_user(args: argparse.Namespace) -> None:
+uid_arg = Argument(..., help="User ID")
+uid_option = Option(None, "--user", "-u", help="User ID")
+
+
+@user_cmd.command("create")
+def create_user(
+    uid: str = uid_arg,
+    display_name: str = Argument(..., help="Display name"),
+    email: str | None = Option(None, "--email", help="Email address"),
+    caps: str | None = Option(None, "--caps", help="User caps"),
+) -> None:
     conn = get_connection()
     user = conn.create_user(
-        uid=args.uid,
-        display_name=args.display_name,
-        email=args.email,
-        user_caps=args.caps,
+        uid=uid,
+        display_name=display_name,
+        email=email,
+        user_caps=caps,
     )
 
     print_json(jsonify_user(user))
 
 
-def delete_user(args: argparse.Namespace) -> None:
+@user_cmd.command("delete")
+def delete_user(uid: str = uid_arg) -> None:
     conn = get_connection()
-    conn.remove_user(args.uid)
+    conn.remove_user(uid)
 
 
-def get_quota(args: argparse.Namespace) -> None:
+@user_cmd.command("get-quota")
+def get_quota(
+    uid: str = uid_arg,
+) -> None:
     conn = get_connection()
-    bucket = json.loads(conn.get_quota(args.uid, "bucket"))
-    user = json.loads(conn.get_quota(args.uid, "user"))
+    bucket = json.loads(conn.get_quota(uid, "bucket"))
+    user = json.loads(conn.get_quota(uid, "user"))
 
     print_json(
         {
@@ -166,45 +186,73 @@ def get_quota(args: argparse.Namespace) -> None:
     )
 
 
-def set_quota(args: argparse.Namespace) -> None:
-    if is_system_user(args.uid):
+@user_cmd.command("set-quota")
+def set_quota(
+    uid: str = uid_arg,
+    max_objects: int = Argument(..., help="Maximum number of objects"),
+    max_size_gb: int = Argument(..., help="Maximum size in GB"),
+) -> None:
+    if is_system_user(uid):
         raise UserError("Cannot modify a system user")
 
     conn = get_connection()
 
     conn.set_user_quota(
-        args.uid,
+        uid,
         "bucket",
         max_size_kb=-1,
-        max_objects=args.max_objects,
+        max_objects=max_objects,
         enabled="False",
     )
 
     conn.set_user_quota(
-        args.uid,
+        uid,
         "user",
-        max_size_kb=args.max_size_gb * 1024 * 1024,
-        max_objects=args.max_objects,
+        max_size_kb=max_size_gb * 1024 * 1024,
+        max_objects=max_objects,
         enabled="True",
     )
 
 
-def get_buckets(args: argparse.Namespace) -> None:
-    conn = get_connection()
-    buckets = conn.get_bucket(bucket=None, uid=args.uid, stats=True)
+app.add_typer(user_cmd, name="user")
 
+bucket_cmd = create_command()
+
+bucket_name_arg = Argument(..., help="Bucket name")
+
+
+@app.command("buckets")
+def buckets_cmd() -> None:
+    """List buckets"""
+    conn = get_connection()
+    buckets = conn.get_bucket(stats=False)
+    print_json(buckets)
+
+
+@app.command("users")
+def users_cmd() -> None:
+    """List users"""
+    conn = get_connection()
+    users = conn.get_users()
+    print_json(users)
+
+
+@bucket_cmd.command("get")
+def get_buckets(
+    name: str | None = typer.Argument(None, help="Bucket name"),
+    uid: str | None = typer.Option(None, "--user", "-u", help="User ID"),
+) -> None:
+    """List all buckets."""
+    conn = get_connection()
+    buckets = conn.get_bucket(bucket=name, uid=uid, stats=True)
     print_json([jsonify_bucket(b) for b in buckets])
 
 
-def get_bucket(args: argparse.Namespace) -> None:
+@bucket_cmd.command("create")
+def create_bucket(uid: str = uid_arg, name: str = bucket_name_arg) -> None:
+    """Create a new bucket."""
     conn = get_connection()
-
-    print_json(jsonify_bucket(conn.get_bucket(args.bucket_name)))
-
-
-def create_bucket(args: argparse.Namespace) -> None:
-    conn = get_connection()
-    user = conn.get_user(args.uid)
+    user = conn.get_user(uid)
 
     conn = get_connection(
         access_key=user.keys[0].access_key,
@@ -213,15 +261,17 @@ def create_bucket(args: argparse.Namespace) -> None:
     )
 
     try:
-        conn.request("PUT", f"/{args.bucket_name}")
+        conn.request("PUT", f"/{name}")
         print("OK")
     except RGWAdminException as e:
         print("Error:", e)
 
 
-def get_policy(args: argparse.Namespace) -> None:
+@bucket_cmd.command("get-policy", short_help="Get bucket policy")
+def get_policy(name: str = bucket_name_arg) -> None:
+    """Get a bucket's policy."""
     conn = get_connection()
-    bucket = conn.get_bucket(args.bucket_name)
+    bucket = conn.get_bucket(name)
     user = conn.get_user(bucket.owner)
 
     conn = get_connection(
@@ -230,13 +280,22 @@ def get_policy(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    response = conn.request("GET", f"/{args.bucket_name}?policy")
+    response = conn.request("GET", f"/{name}?policy")
     print(json.dumps(response, indent=2))
 
 
-def allow_read(args: argparse.Namespace) -> None:
+@bucket_cmd.command("allow-read")
+def allow_read(
+    bucket_name: str = bucket_name_arg,
+    uid_of_reader: str | None = uid_option,
+    public: bool = Option(False, "--public", help="Allow public read access"),
+) -> None:
+    """Allow a user (or the public) to read from a bucket."""
+    if uid_of_reader is None and not public:
+        raise UserError("Must specify a user ID or --public")
+
     conn = get_connection()
-    bucket = conn.get_bucket(args.bucket_name)
+    bucket = conn.get_bucket(bucket_name)
     user = conn.get_user(bucket.owner)
 
     conn = get_connection(
@@ -245,7 +304,11 @@ def allow_read(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    response = conn.request("GET", f"/{args.bucket_name}?policy")
+    response = conn.request("GET", f"/{bucket_name}?policy")
+
+    principal = "*"
+    if not public:
+        principal = f"arn:aws:iam:::user/{uid_of_reader}"
 
     new_statements = [
         {
@@ -254,8 +317,8 @@ def allow_read(args: argparse.Namespace) -> None:
                 "s3:ListBucket",
             ],
             "Effect": "Allow",
-            "Principal": {"AWS": [f"arn:aws:iam:::user/{args.uid_of_reader}"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}"],
+            "Principal": {"AWS": [principal]},
+            "Resource": [f"arn:aws:s3:::{bucket_name}"],
             "Sid": "",
         },
         {
@@ -264,8 +327,8 @@ def allow_read(args: argparse.Namespace) -> None:
                 "S3:GetObjectVersion",
             ],
             "Effect": "Allow",
-            "Principal": {"AWS": [f"arn:aws:iam:::user/{args.uid_of_reader}"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}/*"],
+            "Principal": {"AWS": [principal]},
+            "Resource": [f"arn:aws:s3:::{bucket_name}/*"],
             "Sid": "",
         },
     ]
@@ -278,16 +341,21 @@ def allow_read(args: argparse.Namespace) -> None:
     try:
         conn.request(
             "PUT",
-            f"/{args.bucket_name}?policy",
+            f"/{bucket_name}?policy",
             data=json.dumps(new_policy),
         )
     except RGWAdminException as e:
         print("Error:", e)
 
 
-def allow_public_read(args: argparse.Namespace) -> None:
+@bucket_cmd.command("allow-write")
+def allow_write(
+    bucket_name: str = bucket_name_arg,
+    uid_of_writer: str = uid_arg,
+) -> None:
+    """Allow a user to write to a bucket."""
     conn = get_connection()
-    bucket = conn.get_bucket(args.bucket_name)
+    bucket = conn.get_bucket(bucket_name)
     user = conn.get_user(bucket.owner)
 
     conn = get_connection(
@@ -296,58 +364,7 @@ def allow_public_read(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    response = conn.request("GET", f"/{args.bucket_name}?policy")
-
-    new_statements = [
-        {
-            "Action": [
-                "s3:GetBucketLocation",
-                "s3:ListBucket",
-            ],
-            "Effect": "Allow",
-            "Principal": {"AWS": ["*"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}"],
-            "Sid": "",
-        },
-        {
-            "Action": [
-                "s3:GetObject",
-                "S3:GetObjectVersion",
-            ],
-            "Effect": "Allow",
-            "Principal": {"AWS": ["*"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}/*"],
-            "Sid": "",
-        },
-    ]
-
-    new_policy = {
-        "Statement": simplify(response.get("Statement", []) + new_statements),
-        "Version": "2012-10-17",
-    }
-
-    try:
-        conn.request(
-            "PUT",
-            f"/{args.bucket_name}?policy",
-            data=json.dumps(new_policy),
-        )
-    except RGWAdminException as e:
-        print("Error:", e)
-
-
-def allow_write(args: argparse.Namespace) -> None:
-    conn = get_connection()
-    bucket = conn.get_bucket(args.bucket_name)
-    user = conn.get_user(bucket.owner)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
-
-    result = conn.request("GET", f"/{args.bucket_name}?policy")
+    result = conn.request("GET", f"/{bucket_name}?policy")
 
     new_statements = [
         {
@@ -356,8 +373,8 @@ def allow_write(args: argparse.Namespace) -> None:
                 "s3:ListBucketMultipartUploads",
             ],
             "Effect": "Allow",
-            "Principal": {"AWS": [f"arn:aws:iam:::user/{args.uid_of_writer}"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}"],
+            "Principal": {"AWS": [f"arn:aws:iam:::user/{uid_of_writer}"]},
+            "Resource": [f"arn:aws:s3:::{bucket_name}"],
             "Sid": "",
         },
         {
@@ -369,8 +386,8 @@ def allow_write(args: argparse.Namespace) -> None:
                 "s3:PutObject",
             ],
             "Effect": "Allow",
-            "Principal": {"AWS": [f"arn:aws:iam:::user/{args.uid_of_writer}"]},
-            "Resource": [f"arn:aws:s3:::{args.bucket_name}/*"],
+            "Principal": {"AWS": [f"arn:aws:iam:::user/{uid_of_writer}"]},
+            "Resource": [f"arn:aws:s3:::{bucket_name}/*"],
             "Sid": "",
         },
     ]
@@ -383,16 +400,18 @@ def allow_write(args: argparse.Namespace) -> None:
     try:
         conn.request(
             "PUT",
-            f"/{args.bucket_name}?policy",
+            f"/{bucket_name}?policy",
             data=json.dumps(new_policy),
         )
     except RGWAdminException as e:
         print("Error:", e)
 
 
-def make_private(args: argparse.Namespace) -> None:
+@bucket_cmd.command("make-private")
+def make_private(bucket_name: str = bucket_name_arg) -> None:
+    """Make a bucket private."""
     conn = get_connection()
-    bucket = conn.get_bucket(args.bucket_name)
+    bucket = conn.get_bucket(bucket_name)
     user = conn.get_user(bucket.owner)
 
     conn = get_connection(
@@ -403,9 +422,12 @@ def make_private(args: argparse.Namespace) -> None:
 
     conn.request(
         "PUT",
-        f"/{args.bucket_name}?policy",
+        f"/{bucket_name}?policy",
         data="{}",
     )
+
+
+app.add_typer(bucket_cmd, name="bucket", short_help="Manage buckets")
 
 
 # --------------------------------------------------------------------------
@@ -419,103 +441,9 @@ def init_logging() -> None:
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="be chatty",
-    )
-    parser.set_defaults(func=None)
-    parser.set_defaults(verbose=False)
-
-    subparsers = parser.add_subparsers()
-
-    get_users_parser = subparsers.add_parser("get-users")
-    get_users_parser.add_argument("--include-system", action="store_true")
-    get_users_parser.set_defaults(func=get_users)
-
-    create_user_parser = subparsers.add_parser("create-user")
-    create_user_parser.add_argument("uid")
-    create_user_parser.add_argument("display_name")
-    create_user_parser.add_argument("--email")
-    create_user_parser.add_argument("--caps")
-    create_user_parser.set_defaults(func=create_user)
-
-    delete_user_parser = subparsers.add_parser("delete-user")
-    delete_user_parser.add_argument("uid")
-    delete_user_parser.set_defaults(func=delete_user)
-
-    get_quota_parser = subparsers.add_parser("get-quota")
-    get_quota_parser.add_argument("uid")
-    get_quota_parser.set_defaults(func=get_quota)
-
-    set_quota_parser = subparsers.add_parser("set-quota")
-    set_quota_parser.add_argument("uid")
-    set_quota_parser.add_argument("max_size_gb", type=int)
-    set_quota_parser.add_argument("max_objects", type=int, nargs="?", default=10_000_000)
-    set_quota_parser.set_defaults(func=set_quota)
-
-    get_buckets_parser = subparsers.add_parser("get-buckets")
-    get_buckets_parser.add_argument("uid", nargs="?", default=None)
-    get_buckets_parser.set_defaults(func=get_buckets)
-
-    get_bucket_parser = subparsers.add_parser("get-bucket")
-    get_bucket_parser.add_argument("bucket_name")
-    get_bucket_parser.set_defaults(func=get_bucket)
-
-    create_bucket_parser = subparsers.add_parser("create-bucket")
-    create_bucket_parser.add_argument("uid")
-    create_bucket_parser.add_argument("bucket_name")
-    create_bucket_parser.set_defaults(func=create_bucket)
-
-    get_policy_parser = subparsers.add_parser("get-policy")
-    get_policy_parser.add_argument("bucket_name")
-    get_policy_parser.set_defaults(func=get_policy)
-
-    allow_read_parser = subparsers.add_parser("allow-read")
-    allow_read_parser.add_argument("bucket_name")
-    allow_read_parser.add_argument("uid_of_reader")
-    allow_read_parser.set_defaults(func=allow_read)
-
-    allow_public_read_parser = subparsers.add_parser("allow-public-read")
-    allow_public_read_parser.add_argument("bucket_name")
-    allow_public_read_parser.set_defaults(func=allow_public_read)
-
-    allow_write_parser = subparsers.add_parser("allow-write")
-    allow_write_parser.add_argument("bucket_name")
-    allow_write_parser.add_argument("uid_of_writer")
-    allow_write_parser.set_defaults(func=allow_write)
-
-    make_private_parser = subparsers.add_parser("make-private")
-    make_private_parser.add_argument("bucket_name")
-    make_private_parser.set_defaults(func=make_private)
-
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-
-    if args.func:
-        if args.verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-        args.func(args)
-    else:
-        raise UserError("No action specified on the command line")
-
-
 def entrypoint() -> None:
-    try:
-        init_logging()
-        main()
-    except UserError as exn:
-        print("ERROR:", *exn.args)
-        sys.exit(1)
-    except Exception:  # pylint: disable=broad-except
-        logging.exception("Uncaught exception")
-        sys.exit(1)
+    init_logging()
+    app()
 
 
 if __name__ == "__main__":
