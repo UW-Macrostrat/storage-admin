@@ -3,7 +3,7 @@ requires = ["uv_build>=0.11.1,<0.12.0"]
 build-backend = "uv_build"
 
 [project]
-name = "htpheno.radosgw-admin-client"
+name = "macrostrat.radosgw-admin"
 version = "0.9.0"
 description = "Client for the Ceph Object Gateway Admin Operations API"
 authors = [{ name = "Brian Aydemir", email = "baydemir@morgridge.org" }]
@@ -20,11 +20,11 @@ classifiers = [
 ]
 dependencies = [
     "humanize>=4.11,<4.12",
-    "radosgw-admin>=1.7,<1.8",
+    "rgwadmin>=2.4.5",
 ]
 
 [project.urls]
-Repository = "https://github.com/HTPhenotyping/radosgw_admin_client"
+Repository = "https://github.com/UW-Macrostrat/storage-admin"
 
 [project.scripts]
 radosgw-admin-client = "htpheno.radosgw_admin_client:entrypoint"

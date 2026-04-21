@@ -8,11 +8,16 @@ import logging
 import os
 import re
 import sys
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, NamedTuple
 
 import humanize
-import radosgw  # type: ignore[import-untyped]
-import radosgw.user  # type: ignore[import-untyped]
+
+# import radosgw  # type: ignore[import-untyped]
+# import radosgw.user  # type: ignore[import-untyped]
+
+from rgwadmin import RGWAdmin
+from rgwadmin.exceptions import RGWAdminException
+from rgwadmin.user import RGWCap, RGWKey, RGWUser
 
 
 class UserError(RuntimeError):
@@ -28,7 +33,7 @@ def get_connection(  # nosec hardcoded_password_default
     access_key: str = "",
     secret_key: str = "",
     admin_path: str = "/admin",
-) -> radosgw.connection.RadosGWAdminConnection:
+) -> RGWAdmin:
     # pylint: disable=raise-missing-from
     """
     Returns a connection object for the Ceph Object Gateway.
@@ -57,12 +62,11 @@ def get_connection(  # nosec hardcoded_password_default
     except KeyError:
         raise UserError("'RADOSGW_SECRET_KEY' not set in the environment")
 
-    return radosgw.connection.RadosGWAdminConnection(
-        host=host,
-        access_key=access_key,
-        secret_key=secret_key,
-        admin_path=admin_path,
-    )
+    admin = admin_path
+    if admin_path.startswith("/"):
+        admin = admin_path[1:]
+
+    return RGWAdmin(access_key, secret_key, host, admin)
 
 
 def is_system_user(uid: str) -> bool:
@@ -86,28 +90,34 @@ def print_json(obj: Union[Dict[Any, Any], List[Any]]) -> None:
 # --------------------------------------------------------------------------
 
 
-def jsonify_bucket(bucket: radosgw.bucket.BucketInfo) -> Dict[str, Any]:
+class BucketInfo(NamedTuple):
+    name: str
+    owner: str
+
+
+def jsonify_bucket(bucket: BucketInfo) -> Dict[str, Any]:
     return {
         "name": bucket.name,
         "owner": bucket.owner,
     }
 
 
-def jsonify_cap(cap: radosgw.user.Cap) -> str:
+def jsonify_cap(cap: RGWCap) -> str:
     return f"{cap.type}={cap.perm}"
 
 
-def jsonify_key(key: radosgw.user.Key) -> Dict[str, Any]:
+def jsonify_key(key: RGWKey) -> Dict[str, Any]:
     return {
-        "key_type": key.key_type,
+        # "key_type": key.key_type, # Thios was only present in the old system
         "access_key": key.access_key,
         "secret_key": key.secret_key,
     }
 
 
-def jsonify_user(user: radosgw.user.UserInfo) -> Dict[str, Any]:
+def jsonify_user(user: RGWUser) -> Dict[str, Any]:
+    return user
     return {
-        "uid": user.uid,
+        "uid": user.user_id,
         "display_name": user.display_name,
         "email": user.email,
         "keys": [jsonify_key(k) for k in user.keys],
@@ -119,7 +129,7 @@ def get_users(args: argparse.Namespace) -> None:
     conn = get_connection()
     users = []
 
-    for uid in conn.get_uids():
+    for uid in conn.get_users():
         if args.include_system or not is_system_user(uid):
             users.append(conn.get_user(uid))
 
@@ -140,7 +150,7 @@ def create_user(args: argparse.Namespace) -> None:
 
 def delete_user(args: argparse.Namespace) -> None:
     conn = get_connection()
-    conn.delete_user(args.uid)
+    conn.remove_user(args.uid)
 
 
 def get_quota(args: argparse.Namespace) -> None:
@@ -170,26 +180,26 @@ def set_quota(args: argparse.Namespace) -> None:
 
     conn = get_connection()
 
-    conn.set_quota(
+    conn.set_user_quota(
         args.uid,
         "bucket",
-        enabled="False",
         max_size_kb=-1,
         max_objects=args.max_objects,
+        enabled="False",
     )
 
-    conn.set_quota(
+    conn.set_user_quota(
         args.uid,
         "user",
-        enabled="True",
         max_size_kb=args.max_size_gb * 1024 * 1024,
         max_objects=args.max_objects,
+        enabled="True",
     )
 
 
 def get_buckets(args: argparse.Namespace) -> None:
     conn = get_connection()
-    buckets = conn.get_buckets(uid=args.uid)
+    buckets = conn.get_bucket(bucket=None, uid=args.uid)
 
     print_json([jsonify_bucket(b) for b in buckets])
 
@@ -210,10 +220,11 @@ def create_bucket(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    r = conn.make_request("PUT", path=f"/{args.bucket_name}")
-    b = conn._process_response(r)
-
-    print("OK" if b is None else "ERROR?")
+    try:
+        conn.request("PUT", f"/{args.bucket_name}")
+        print("OK")
+    except RGWAdminException as e:
+        print("Error:", e)
 
 
 def get_policy(args: argparse.Namespace) -> None:
@@ -227,17 +238,8 @@ def get_policy(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    r = conn.make_request("GET", path=f"/{args.bucket_name}?policy")
-    body = r.read()
-    b = "{}"
-
-    if r.status == 200:
-        if isinstance(body, bytes) and hasattr(body, "decode"):
-            b = body.decode("utf-8")
-        else:
-            b = body
-
-    print(json.dumps(json.loads(b), indent=2))
+    response = conn.request("GET", f"/{args.bucket_name}?policy")
+    print(json.dumps(response, indent=2))
 
 
 def allow_read(args: argparse.Namespace) -> None:
@@ -251,15 +253,7 @@ def allow_read(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    r = conn.make_request("GET", path=f"/{args.bucket_name}?policy")
-    body = r.read()
-    b = "{}"
-
-    if r.status == 200:
-        if isinstance(body, bytes) and hasattr(body, "decode"):
-            b = body.decode("utf-8")
-        else:
-            b = body
+    response = conn.request("GET", f"/{args.bucket_name}?policy")
 
     new_statements = [
         {
@@ -285,18 +279,18 @@ def allow_read(args: argparse.Namespace) -> None:
     ]
 
     new_policy = {
-        "Statement": simplify(json.loads(b).get("Statement", []) + new_statements),
+        "Statement": simplify(response.get("Statement", []) + new_statements),
         "Version": "2012-10-17",
     }
 
-    r = conn.make_request(
-        "PUT",
-        path=f"/{args.bucket_name}?policy",
-        data=json.dumps(new_policy),
-    )
-
-    if body := r.read():
-        print("Error:", body)
+    try:
+        conn.request(
+            "PUT",
+            f"/{args.bucket_name}?policy",
+            data=json.dumps(new_policy),
+        )
+    except RGWAdminException as e:
+        print("Error:", e)
 
 
 def allow_public_read(args: argparse.Namespace) -> None:
@@ -310,15 +304,7 @@ def allow_public_read(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    r = conn.make_request("GET", path=f"/{args.bucket_name}?policy")
-    body = r.read()
-    b = "{}"
-
-    if r.status == 200:
-        if isinstance(body, bytes) and hasattr(body, "decode"):
-            b = body.decode("utf-8")
-        else:
-            b = body
+    response = conn.request("GET", f"/{args.bucket_name}?policy")
 
     new_statements = [
         {
@@ -344,18 +330,18 @@ def allow_public_read(args: argparse.Namespace) -> None:
     ]
 
     new_policy = {
-        "Statement": simplify(json.loads(b).get("Statement", []) + new_statements),
+        "Statement": simplify(response.get("Statement", []) + new_statements),
         "Version": "2012-10-17",
     }
 
-    r = conn.make_request(
-        "PUT",
-        path=f"/{args.bucket_name}?policy",
-        data=json.dumps(new_policy),
-    )
-
-    if body := r.read():
-        print("Error:", body)
+    try:
+        conn.request(
+            "PUT",
+            f"/{args.bucket_name}?policy",
+            data=json.dumps(new_policy),
+        )
+    except RGWAdminException as e:
+        print("Error:", e)
 
 
 def allow_write(args: argparse.Namespace) -> None:
@@ -369,15 +355,7 @@ def allow_write(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    r = conn.make_request("GET", path=f"/{args.bucket_name}?policy")
-    body = r.read()
-    b = "{}"
-
-    if r.status == 200:
-        if isinstance(body, bytes) and hasattr(body, "decode"):
-            b = body.decode("utf-8")
-        else:
-            b = body
+    result = conn.request("GET", f"/{args.bucket_name}?policy")
 
     new_statements = [
         {
@@ -406,18 +384,18 @@ def allow_write(args: argparse.Namespace) -> None:
     ]
 
     new_policy = {
-        "Statement": simplify(json.loads(b).get("Statement", []) + new_statements),
+        "Statement": simplify(result.get("Statement", []) + new_statements),
         "Version": "2012-10-17",
     }
 
-    r = conn.make_request(
-        "PUT",
-        path=f"/{args.bucket_name}?policy",
-        data=json.dumps(new_policy),
-    )
-
-    if body := r.read():
-        print("Error:", body)
+    try:
+        conn.request(
+            "PUT",
+            f"/{args.bucket_name}?policy",
+            data=json.dumps(new_policy),
+        )
+    except RGWAdminException as e:
+        print("Error:", e)
 
 
 def make_private(args: argparse.Namespace) -> None:
@@ -431,9 +409,9 @@ def make_private(args: argparse.Namespace) -> None:
         admin_path="",
     )
 
-    conn.make_request(
+    conn.request(
         "PUT",
-        path=f"/{args.bucket_name}?policy",
+        f"/{args.bucket_name}?policy",
         data="{}",
     )
 
