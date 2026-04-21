@@ -24,6 +24,9 @@ from .utils import (
 )
 
 
+log = logging.getLogger(__name__)
+
+
 def get_connection(  # nosec hardcoded_password_default
     access_key: str = "",
     secret_key: str = "",
@@ -61,7 +64,7 @@ def get_connection(  # nosec hardcoded_password_default
     if admin_path.startswith("/"):
         admin = admin_path[1:]
 
-    return RGWAdmin(access_key, secret_key, host, admin)
+    return RGWAdmin(access_key, secret_key, host, admin=admin)
 
 
 def get_user_connection(uid: str):
@@ -71,7 +74,6 @@ def get_user_connection(uid: str):
     return get_connection(
         access_key=credentials.access_key,
         secret_key=credentials.secret_key,
-        admin_path="",
     )
 
 
@@ -79,7 +81,7 @@ def get_bucket_connection(bucket_name: str):
     """Get a connection as bucket owner"""
     conn = get_connection()
     bucket = conn.get_bucket(bucket_name)
-    return get_user_connection(bucket.owner)
+    return get_user_connection(bucket["owner"])
 
 
 # --------------------------------------------------------------------------
@@ -130,9 +132,6 @@ def command_callback(
     mode = resolve_mode(output_mode, json_out)
     output_mode_ctx.set(mode)
 
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
 
 user_cmd = create_command(short_help="Manage users")
 
@@ -171,7 +170,7 @@ def create_user(
         user_caps=caps,
     )
 
-    print_json(jsonify_user(user))
+    print_json(jsonify_user(RGWUser(**user)))
 
 
 @user_cmd.command("delete")
@@ -296,8 +295,9 @@ def allow_read(
         raise UserError("Must specify a user ID or --public")
 
     conn = get_bucket_connection(bucket_name)
-
     response = conn.request("GET", f"/{bucket_name}?policy")
+
+    log.info("Current policy for %s, %s", bucket_name, response)
 
     principal = "*"
     if not public:
@@ -331,14 +331,12 @@ def allow_read(
         "Version": "2012-10-17",
     }
 
-    try:
-        conn.request(
-            "PUT",
-            f"/{bucket_name}?policy",
-            data=json.dumps(new_policy),
-        )
-    except RGWAdminException as e:
-        print("Error:", e)
+    log.info("Updating policy for %s", bucket_name)
+    conn.request(
+        "PUT",
+        f"/{bucket_name}?policy",
+        data=json.dumps(new_policy),
+    )
 
 
 @bucket_cmd.command("allow-write")
@@ -386,7 +384,7 @@ def allow_write(
         conn.request(
             "PUT",
             f"/{bucket_name}?policy",
-            data=json.dumps(new_policy),
+            data=new_policy,
         )
     except RGWAdminException as e:
         print("Error:", e)
