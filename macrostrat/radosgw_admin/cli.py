@@ -90,16 +90,8 @@ def print_json(obj: Union[Dict[Any, Any], List[Any]]) -> None:
 # --------------------------------------------------------------------------
 
 
-class BucketInfo(NamedTuple):
-    name: str
-    owner: str
-
-
-def jsonify_bucket(bucket: BucketInfo) -> Dict[str, Any]:
-    return {
-        "name": bucket.name,
-        "owner": bucket.owner,
-    }
+def jsonify_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    return bucket  # Passthrough inheriting older structure
 
 
 def jsonify_cap(cap: RGWCap) -> str:
@@ -115,13 +107,12 @@ def jsonify_key(key: RGWKey) -> Dict[str, Any]:
 
 
 def jsonify_user(user: RGWUser) -> Dict[str, Any]:
-    return user
     return {
         "uid": user.user_id,
         "display_name": user.display_name,
         "email": user.email,
-        "keys": [jsonify_key(k) for k in user.keys],
-        "caps": [jsonify_cap(c) for c in user.caps],
+        "keys": [jsonify_key(RGWKey(**k)) for k in user.keys],
+        "caps": [jsonify_cap(RGWCap(**c)) for c in user.caps],
     }
 
 
@@ -131,7 +122,8 @@ def get_users(args: argparse.Namespace) -> None:
 
     for uid in conn.get_users():
         if args.include_system or not is_system_user(uid):
-            users.append(conn.get_user(uid))
+            ures = conn.get_user(uid)
+            users.append(RGWUser(**ures))
 
     print_json([jsonify_user(u) for u in users])
 
@@ -199,7 +191,7 @@ def set_quota(args: argparse.Namespace) -> None:
 
 def get_buckets(args: argparse.Namespace) -> None:
     conn = get_connection()
-    buckets = conn.get_bucket(bucket=None, uid=args.uid)
+    buckets = conn.get_bucket(bucket=None, uid=args.uid, stats=True)
 
     print_json([jsonify_bucket(b) for b in buckets])
 
