@@ -11,7 +11,7 @@ import typer
 
 from rgwadmin import RGWAdmin
 from rgwadmin.exceptions import RGWAdminException
-from rgwadmin.user import RGWUser
+from rgwadmin.user import RGWUser, RGWKey
 from typer import Typer, Option, Argument
 
 from .utils import (
@@ -62,6 +62,24 @@ def get_connection(  # nosec hardcoded_password_default
         admin = admin_path[1:]
 
     return RGWAdmin(access_key, secret_key, host, admin)
+
+
+def get_user_connection(uid: str):
+    conn = get_connection()
+    user = conn.get_user(uid)
+    credentials = RGWKey(**user["keys"][0])
+    return get_connection(
+        access_key=credentials.access_key,
+        secret_key=credentials.secret_key,
+        admin_path="",
+    )
+
+
+def get_bucket_connection(bucket_name: str):
+    """Get a connection as bucket owner"""
+    conn = get_connection()
+    bucket = conn.get_bucket(bucket_name)
+    return get_user_connection(bucket.owner)
 
 
 # --------------------------------------------------------------------------
@@ -251,15 +269,7 @@ def get_buckets(
 @bucket_cmd.command("create")
 def create_bucket(uid: str = uid_arg, name: str = bucket_name_arg) -> None:
     """Create a new bucket."""
-    conn = get_connection()
-    user = conn.get_user(uid)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
-
+    conn = get_user_connection(uid)
     try:
         conn.request("PUT", f"/{name}")
         print("OK")
@@ -270,16 +280,7 @@ def create_bucket(uid: str = uid_arg, name: str = bucket_name_arg) -> None:
 @bucket_cmd.command("get-policy", short_help="Get bucket policy")
 def get_policy(name: str = bucket_name_arg) -> None:
     """Get a bucket's policy."""
-    conn = get_connection()
-    bucket = conn.get_bucket(name)
-    user = conn.get_user(bucket.owner)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
-
+    conn = get_bucket_connection(name)
     response = conn.request("GET", f"/{name}?policy")
     print(json.dumps(response, indent=2))
 
@@ -294,15 +295,7 @@ def allow_read(
     if uid_of_reader is None and not public:
         raise UserError("Must specify a user ID or --public")
 
-    conn = get_connection()
-    bucket = conn.get_bucket(bucket_name)
-    user = conn.get_user(bucket.owner)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
+    conn = get_bucket_connection(bucket_name)
 
     response = conn.request("GET", f"/{bucket_name}?policy")
 
@@ -354,15 +347,7 @@ def allow_write(
     uid_of_writer: str = uid_arg,
 ) -> None:
     """Allow a user to write to a bucket."""
-    conn = get_connection()
-    bucket = conn.get_bucket(bucket_name)
-    user = conn.get_user(bucket.owner)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
+    conn = get_bucket_connection(bucket_name)
 
     result = conn.request("GET", f"/{bucket_name}?policy")
 
@@ -410,16 +395,7 @@ def allow_write(
 @bucket_cmd.command("make-private")
 def make_private(bucket_name: str = bucket_name_arg) -> None:
     """Make a bucket private."""
-    conn = get_connection()
-    bucket = conn.get_bucket(bucket_name)
-    user = conn.get_user(bucket.owner)
-
-    conn = get_connection(
-        access_key=user.keys[0].access_key,
-        secret_key=user.keys[0].secret_key,
-        admin_path="",
-    )
-
+    conn = get_bucket_connection(bucket_name)
     conn.request(
         "PUT",
         f"/{bucket_name}?policy",
