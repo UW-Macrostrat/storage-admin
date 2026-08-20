@@ -3,6 +3,8 @@ Client for the Ceph Object Gateway Admin Operations API.
 """
 
 import logging
+from typing import Annotated
+
 import os
 from contextvars import ContextVar
 
@@ -36,15 +38,6 @@ def get_connection(  # nosec hardcoded_password_default
     """
     Returns a connection object for the Ceph Object Gateway.
     """
-
-    try:
-        with open("/etc/htpheno/radosgw.json", encoding="utf-8") as fp:
-            config = json.loads(fp.read())
-        for k in ["RADOSGW_HOST", "RADOSGW_ACCESS_KEY", "RADOSGW_SECRET_KEY"]:
-            os.environ.setdefault(k, config[k])
-    except FileNotFoundError:
-        pass
-
     try:
         host = os.environ["RADOSGW_HOST"]
     except KeyError:
@@ -135,20 +128,42 @@ def command_callback(
 
 user_cmd = create_command(short_help="Manage users")
 
+class KeyChoice(str, Enum):
+    access_key = "access_key"
+    secret_key = "secret_key"
 
 @user_cmd.command("get")
 def get_users(
+    uid: str = Argument(None, help="User ID"),
     include_system: bool = Option(False, "--system/--no-system", help="Include system users"),
+    key: Annotated[KeyChoice, Option(..., "--key", help="Key to fetch")] = None
 ) -> None:
     conn = get_connection()
-    users = []
 
-    for uid in conn.get_users():
-        if include_system or not is_system_user(uid):
-            ures = conn.get_user(uid)
+    if uid is None and key is not None:
+        raise ValueError("User ID is required when fetching a specific key")
+
+    # First assemble the user list
+    users = []
+    for user in conn.get_users():
+        if uid and user != uid:
+            continue
+        if include_system or not is_system_user(user):
+            ures = conn.get_user(user)
             users.append(RGWUser(**ures))
 
-    print_json([jsonify_user(u) for u in users])
+    if len(users) == 0:
+        raise ValueError("No users found")
+
+    if len(users) == 1 and uid:
+        user = users[0]
+        if key is not None:
+            print(user.keys[0][key])
+        else:
+            print_json(jsonify_user(users[0]))
+
+    else:
+        print_json([jsonify_user(u) for u in users])
 
 
 uid_arg = Argument(..., help="User ID")
