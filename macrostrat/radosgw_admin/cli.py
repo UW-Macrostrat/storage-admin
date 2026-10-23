@@ -9,8 +9,10 @@ import os
 from contextvars import ContextVar
 
 import humanize
+import requests
 import typer
 
+from requests_aws4auth import AWS4Auth
 from rgwadmin import RGWAdmin
 from rgwadmin.exceptions import RGWAdminException
 from rgwadmin.user import RGWUser, RGWKey
@@ -75,6 +77,21 @@ def get_bucket_connection(bucket_name: str):
     conn = get_connection()
     bucket = conn.get_bucket(bucket_name)
     return get_user_connection(bucket["owner"])
+
+
+def get_bucket_policy(conn: RGWAdmin, bucket_name: str) -> dict:
+    """A bucket's policy, or an empty one if it has none."""
+    # S3 errors are XML, which rgwadmin cannot parse; it reports them as ServerDown.
+    r = requests.get(
+        f"{conn.get_base_url()}/{bucket_name}?policy",
+        auth=AWS4Auth(conn._access_key, conn._secret_key, "nowhere", "s3"),
+        verify=conn._ca_bundle or conn._verify,
+        timeout=conn._timeout,
+    )
+    if r.status_code == 404 and "<Code>NoSuchBucketPolicy</Code>" in r.text:
+        return {}
+    r.raise_for_status()
+    return r.json()
 
 
 # --------------------------------------------------------------------------
@@ -295,7 +312,7 @@ def create_bucket(uid: str = uid_arg, name: str = bucket_name_arg) -> None:
 def get_policy(name: str = bucket_name_arg) -> None:
     """Get a bucket's policy."""
     conn = get_bucket_connection(name)
-    response = conn.request("GET", f"/{name}?policy")
+    response = get_bucket_policy(conn, name)
     print(json.dumps(response, indent=2))
 
 
@@ -310,7 +327,7 @@ def allow_read(
         raise UserError("Must specify a user ID or --public")
 
     conn = get_bucket_connection(bucket_name)
-    response = conn.request("GET", f"/{bucket_name}?policy")
+    response = get_bucket_policy(conn, bucket_name)
 
     log.info("Current policy for %s, %s", bucket_name, response)
 
@@ -362,7 +379,7 @@ def allow_write(
     """Allow a user to write to a bucket."""
     conn = get_bucket_connection(bucket_name)
 
-    result = conn.request("GET", f"/{bucket_name}?policy")
+    result = get_bucket_policy(conn, bucket_name)
 
     new_statements = [
         {
